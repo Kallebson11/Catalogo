@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+from decouple import config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,11 +20,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-2zhf#&)2tixp%!&_8fh4z4zi&@rlm&+()ui^(oq38)7jv(ro4g'
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
 ALLOWED_HOSTS = []
 
@@ -80,16 +76,27 @@ WSGI_APPLICATION = 'config.wsgi.application'
     }
 }"""
 
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY  = config('SECRET_KEY')
+DEBUG       = config('DEBUG', default=False, cast=bool) 
+ENGINE      = config('ENGINE', default='')
+NAME        = config('NAME', default='')
+USER        = config('USER', default='')
+PASSWORD    = config('PASSWORD', default='')
+PORT        = config('PORT', default='')
+HOST        = config('HOST', default='')
+DRIVER      = config('DRIVER', default='')
+
 DATABASES = {
     'default' :{
-        'ENGINE': 'mssql',
-        'NAME': 'CATALOGO',
-        'USER': 'sa',
-        'PASSWORD': '251525',
-        'HOST': 'DSNB285',
-        'PORT': 50844,
+        'ENGINE': ENGINE,
+        'NAME': NAME,
+        'USER': USER,
+        'PASSWORD': PASSWORD,
+        'HOST': HOST,
+        'PORT': PORT,
         'OPTIONS':{
-            'driver':'ODBC Driver 17 for SQL Server',
+            'driver': DRIVER,
             'Trusted_connection':'yes'
         }
     }

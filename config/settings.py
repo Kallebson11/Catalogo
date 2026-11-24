@@ -76,16 +76,22 @@ WSGI_APPLICATION = 'config.wsgi.application'
     }
 }"""
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY  = config('SECRET_KEY')
-DEBUG       = config('DEBUG', default=False, cast=bool) 
-ENGINE      = config('ENGINE', default='')
-NAME        = config('NAME', default='')
-USER        = config('USER', default='')
-PASSWORD    = config('PASSWORD', default='')
-PORT        = config('PORT', default='')
-HOST        = config('HOST', default='')
-DRIVER      = config('DRIVER', default='')
+# Cloudflare
+R2_ACCOUNT_ID           =   config("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID        =   config("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY    =   config("R2_SECRET_ACCESS_KEY")
+R2_BUCKET               =   config("R2_BUCKET")
+
+# Database
+SECRET_KEY  =   config('SECRET_KEY')
+DEBUG       =   config('DEBUG', default=False, cast=bool) 
+ENGINE      =   config('ENGINE', default='')
+NAME        =   config('NAME', default='')
+USER        =   config('USER', default='')
+PASSWORD    =   config('PASSWORD', default='')
+PORT        =   config('PORT', default='')
+HOST        =   config('HOST', default='')
+DRIVER      =   config('DRIVER', default='')
 
 DATABASES = {
     'default' :{

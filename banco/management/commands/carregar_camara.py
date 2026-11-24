@@ -3,6 +3,7 @@ from django.core.management.base import BaseCommand
 from banco.services.deputados_sync import DeputadoSyncService
 from banco.services.partidos_sync import PartidoSyncService
 from banco.services.despesas_sync import DespesasSyncService
+from banco.services.despesas_storage import salvar_despesas_no_r2
 
 class Command(BaseCommand):
 
@@ -38,6 +39,11 @@ class Command(BaseCommand):
             f"Partidos: {criados} criados | "
             f"{atualizados} atualizados"
         )
+
+        # 3. Despesas
+        url_despesas = f"https://www.camara.leg.br/cotas/Ano-{ano}.json.zip"
+        chave = salvar_despesas_no_r2(url_despesas, ano)
+        self.stdout.write(f"Arquivo de despesas enviado ao R2: {chave}")
 
         criados, atualizados = DespesasSyncService(ano).sync()
 

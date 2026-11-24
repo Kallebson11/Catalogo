@@ -1,268 +1,139 @@
-# Pipeline de Dados – Câmara dos Deputados
+# Catálogo de dados da Câmara dos Deputados
 
-Projeto de engenharia de dados ponta a ponta: extração de dados abertos da Câmara dos Deputados via API pública, ingestão no **SQL Server** com **Django REST Framework**, ELT com **Pentaho Data Integration (PDI)** e construção de uma **arquitetura medalhão (Bronze/Silver/Gold)** com **Star Schema** no **Databricks**.
+Projeto em desenvolvimento para coletar dados abertos da Câmara dos Deputados, armazená-los em SQL Server e preparar artefatos para análises posteriores.
 
-> **Status:** em desenvolvimento. Os nomes de endpoints, campos e tabelas descritos aqui são a proposta inicial e devem ser validados na [documentação oficial da API](https://dadosabertos.camara.leg.br/swagger/api.html).
+## Estado atual
 
----
+O fluxo funcional implementado é a ingestão por meio de um comando Django:
 
-## Sumário
+1. Consulta deputados e partidos na API Dados Abertos da Câmara e sincroniza os resultados no SQL Server.
+2. Baixa o arquivo anual compactado de despesas (`Ano-{ano}.json.zip`) publicado pela Câmara.
+3. Extrai o JSON e o envia ao bucket Cloudflare R2, usando a chave `despesas/{ano}/despesas.json`.
+4. Lê o JSON do R2 em fluxo e sincroniza as despesas no SQL Server por `id_documento`.
+5. Registra o resultado das cargas na tabela `stage.log_carga`.
 
-- [Objetivo](#objetivo)
-- [Arquitetura](#arquitetura)
-- [Stack](#stack)
-- [Fonte de dados](#fonte-de-dados)
-- [Modelo de dados](#modelo-de-dados)
-- [Estrutura do repositório](#estrutura-do-repositório)
-- [Pré-requisitos](#pré-requisitos)
-- [Como executar](#como-executar)
-- [Etapas do projeto](#etapas-do-projeto)
-- [Qualidade de dados](#qualidade-de-dados)
-- [CI/CD](#cicd)
-- [Consultas analíticas](#consultas-analíticas)
-- [Autor](#autor)
+O arquivo é baixado e processado por temporários descartáveis. Eles podem usar o diretório temporário do sistema quando passam de 8 MiB e são removidos ao fim da etapa. No R2, o processo remove o objeto da chave anual antes de enviar a nova carga; mantenha o versionamento do bucket desativado se não quiser conservar versões antigas.
 
----
+O repositório também contém um script SQL, uma transformação do Pentaho e diagramas de arquitetura e modelo dimensional. A implementação de um lakehouse Bronze/Silver/Gold no Databricks e uma API REST própria ainda não estão presentes no código versionado.
 
-## Objetivo
+## Tecnologias
 
-Demonstrar, em um cenário reproduzível, as práticas centrais de um pipeline de dados moderno:
+- Python e Django.
+- SQL Server, com o backend `mssql-django`.
+- Cloudflare R2 acessado pela API compatível com S3 (`boto3`).
+- API pública Dados Abertos da Câmara dos Deputados.
+- `ijson` para ler o JSON de despesas sem carregá-lo inteiro na memória.
+- Pentaho Data Integration: há uma transformação versionada em `PDI/`.
 
-- Consumo de API paginada com tratamento de falhas e cargas idempotentes.
-- Camada relacional de staging em SQL Server.
-- ELT com carga incremental, controle de execução e logs no PDI.
-- Catalogação com Unity Catalog e arquitetura medalhão em Delta Lake.
-- Modelagem dimensional (Star Schema) para análise.
-- Versionamento e automação com GitHub e GitHub Actions.
-
-## Arquitetura
-
-```mermaid
-flowchart LR
-    A[API Dados Abertos<br/>Câmara dos Deputados] -->|JSON paginado| B[Django + DRF<br/>management command]
-    B -->|upsert| C[(SQL Server<br/>stg_*)]
-    C -->|ELT incremental| D[Pentaho Data Integration]
-    D --> E[(Bronze<br/>Delta)]
-    E -->|limpeza e padronização| F[(Silver<br/>Delta)]
-    F -->|modelagem dimensional| G[(Gold<br/>Star Schema)]
-    G --> H[Consultas SQL<br/>e dashboard]
-```
-
-| Camada | Tecnologia | Função |
-|---|---|---|
-| Fonte | API Câmara dos Deputados | Deputados, partidos e despesas da cota parlamentar |
-| Ingestão | Django + DRF + `mssql-django` | Consome a API e grava no SQL Server |
-| Staging | SQL Server | Dados brutos da origem (`stg_*`) |
-| ELT | Pentaho Data Integration | Move e transforma dados do SQL Server para o Databricks |
-| Bronze | Databricks (Delta Lake) | Dado cru + metadados de ingestão |
-| Silver | Databricks (PySpark/SQL) | Tipagem, deduplicação, padronização, qualidade |
-| Gold | Databricks (SQL) | Star Schema: fato e dimensões |
-
-## Stack
-
-- **Linguagens:** Python, SQL, PySpark
-- **Backend de ingestão:** Django, Django REST Framework, `mssql-django`
-- **Banco relacional:** Microsoft SQL Server (SSMS)
-- **ELT:** Pentaho Data Integration 10.2 CE
-- **Lakehouse:** Databricks Free Edition, Delta Lake, Unity Catalog
-- **Versionamento e automação:** Git, GitHub, GitHub Actions
-- **Testes:** pytest
-
-## Fonte de dados
-
-API pública **Dados Abertos da Câmara dos Deputados**, sem necessidade de chave de acesso.
-
-- URL base: `https://dadosabertos.camara.leg.br/api/v2`
-
-| Endpoint | Uso | Alimenta |
-|---|---|---|
-| `GET /deputados` | Lista de deputados | `stg_deputados` → `dim_deputado` |
-| `GET /partidos` | Lista de partidos | `stg_partidos` → `dim_partido` |
-| `GET /deputados/{id}/despesas` | Despesas da cota parlamentar (filtros de ano/mês, paginação) | `stg_despesas` → `fato_despesa`, `dim_fornecedor`, `dim_tipo_despesa` |
-
-## Modelo de dados
-
-### Staging (SQL Server)
-
-`stg_deputados`, `stg_partidos` e `stg_despesas`, todas com a coluna `data_carga` para auditoria e controle de carga incremental.
-
-### Gold (Star Schema)
-
-```mermaid
-erDiagram
-    fato_despesa }o--|| dim_deputado : sk_deputado
-    fato_despesa }o--|| dim_partido : sk_partido
-    fato_despesa }o--|| dim_fornecedor : sk_fornecedor
-    fato_despesa }o--|| dim_tipo_despesa : sk_tipo_despesa
-    fato_despesa }o--|| dim_tempo : sk_tempo
-
-    fato_despesa {
-        bigint sk_deputado FK
-        bigint sk_partido FK
-        bigint sk_fornecedor FK
-        bigint sk_tipo_despesa FK
-        int sk_tempo FK
-        bigint cod_documento
-        decimal valor_documento
-        decimal valor_glosa
-        decimal valor_liquido
-    }
-    dim_deputado {
-        bigint sk_deputado PK
-        int id_deputado
-        string nome
-        string sigla_uf
-        int id_legislatura
-    }
-    dim_partido {
-        bigint sk_partido PK
-        int id_partido
-        string sigla
-        string nome
-    }
-    dim_fornecedor {
-        bigint sk_fornecedor PK
-        string cnpj_cpf
-        string nome_fornecedor
-    }
-    dim_tipo_despesa {
-        bigint sk_tipo_despesa PK
-        string descricao
-    }
-    dim_tempo {
-        int sk_tempo PK
-        date data
-        int ano
-        int mes
-        int trimestre
-    }
-```
+O Django REST Framework está listado nas dependências, mas atualmente `config/urls.py` expõe apenas a interface administrativa; a ingestão é executada pelo management command.
 
 ## Estrutura do repositório
 
 ```text
 .
-├── django_api/        # Projeto Django/DRF (models, management command, testes)
-├── pdi/               # Jobs (.kjb) e transformações (.ktr) do Pentaho
-├── databricks/        # Notebooks/scripts de Bronze, Silver e Gold
-├── sql/               # DDL do SQL Server e consultas analíticas
-├── docs/              # Diagramas e documentação adicional
-├── .github/workflows/ # Pipelines do GitHub Actions
-├── .env.example       # Modelo de variáveis de ambiente (sem credenciais)
+├── banco/
+│   ├── management/commands/carregar_camara.py
+│   ├── migrations/              # Migrações do app banco
+│   ├── services/                # Sincronização, extração e acesso ao R2
+│   ├── models.py                # Deputados, partidos, despesas e log de carga
+│   └── tests.py                 # Arquivo de testes ainda sem casos implementados
+├── config/                      # Configurações e URLs do Django
+├── diagramas/                   # Arquitetura e Star Schema (Draw.io)
+├── PDI/                         # Transformação do Pentaho
+├── sql/scripts/                 # DDL de referência para tabelas do SQL Server
+├── manage.py
+├── requirements.txt
 └── README.md
 ```
 
 ## Pré-requisitos
 
-- Python 3.11+
-- SQL Server e SQL Server Management Studio (SSMS)
-- ODBC Driver 18 for SQL Server
-- Pentaho Data Integration 10.2 CE
-- Conta no Databricks Free Edition
-- Git
+- Python compatível com as versões listadas em `requirements.txt`.
+- SQL Server acessível pela máquina que executará o Django.
+- Driver ODBC para SQL Server compatível com o driver configurado em `settings.ini`.
+- Conta Cloudflare com R2 habilitado, bucket criado e credenciais S3 com permissão de leitura e escrita de objetos nesse bucket.
+- Git.
 
-## Como executar
+O script `sql/scripts/criacao_tabelas.sql` documenta as tabelas do schema `stage`. Para uma instalação nova, crie o banco de dados e o schema necessários antes de aplicar as migrações. Não execute o script de criação sobre tabelas que já existem.
 
-### 1. Clonar e preparar o ambiente
+## Configuração local
 
-```bash
-git clone <url-do-repositorio>
-cd <nome-do-repositorio>
+Crie e ative um ambiente virtual e instale as dependências:
 
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r django_api/requirements.txt
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-### 2. Configurar variáveis de ambiente
+Na raiz do projeto, crie `settings.ini`. Esse arquivo é ignorado pelo Git; não versione nem compartilhe seus segredos.
 
-Copie o modelo e preencha com seus dados. **Nunca versione o arquivo `.env`.**
-
-```bash
-cp .env.example .env
+```ini
+[settings]
+SECRET_KEY = substitua-pela-chave-local-do-django
+DEBUG = False
+ENGINE = mssql
+NAME = nome-do-banco
+USER = usuario-do-banco
+PASSWORD = senha-do-banco
+HOST = servidor-do-banco
+PORT = 1433
+DRIVER = ODBC Driver 17 for SQL Server
+R2_ACCOUNT_ID = id-da-conta-cloudflare
+R2_ACCESS_KEY_ID = access-key-do-r2
+R2_SECRET_ACCESS_KEY = secret-access-key-do-r2
+R2_BUCKET = nome-do-bucket
 ```
 
-```env
-DB_NAME=camara_dw
-DB_USER=
-DB_PASSWORD=
-DB_HOST=localhost
-DB_PORT=1433
-CAMARA_API_BASE_URL=https://dadosabertos.camara.leg.br/api/v2
-```
+Use os nomes e valores correspondentes à sua instalação. `R2_ACCOUNT_ID` deve ser somente o ID da conta; `R2_BUCKET`, somente o nome do bucket. O `R2_SECRET_ACCESS_KEY` é secreto e não pode ser recuperado novamente pelo painel após a criação das credenciais.
 
-### 3. Criar as tabelas de staging
+## Banco de dados e migrações
 
-```bash
-cd django_api
+Com `settings.ini` configurado e a conexão com SQL Server disponível:
+
+```powershell
 python manage.py migrate
+python manage.py showmigrations banco
 ```
 
-### 4. Ingerir dados da API no SQL Server
+As tabelas usadas pela aplicação são `stage.deputados`, `stage.partidos`, `stage.despesas` e `stage.log_carga`. A chave primária de despesas é `id_documento`.
 
-```bash
-python manage.py carregar_camara --ano 2025
+## Executar a carga
+
+Informe o ano das despesas:
+
+```powershell
+python manage.py carregar_camara --ano 2026
 ```
 
-O comando pagina a API, aplica *retry* em caso de falha e faz *upsert* usando `cod_documento`, o que permite reexecutar sem duplicar dados.
+Cada execução sincroniza deputados e partidos, baixa e atualiza o JSON anual no R2 e, em seguida, grava as despesas no SQL Server. Os registros são criados ou atualizados pelo identificador do documento, permitindo reexecutar a carga. Quando a origem não informa `valorGlosa`, o código usa zero; quando falta `idDocumento`, tenta construir um identificador inteiro a partir de `numero`.
 
-### 5. Executar o ELT no PDI
+O comando altera dados no SQL Server e no R2. Execute-o apenas com as configurações e o ano desejados. O resumo informa quantos registros de cada conjunto foram criados e atualizados; os detalhes da execução ficam em `stage.log_carga`.
 
-1. Abra o Spoon e configure as conexões com o SQL Server e com o Databricks.
-2. Execute o job principal em `pdi/` (carga incremental por ano/mês).
-3. Confirme que os dados chegaram à camada Bronze.
+## Artefatos analíticos
 
-### 6. Construir Silver e Gold no Databricks
+- `diagramas/StarSchemaCatalogo.drawio`: desenho do modelo dimensional proposto.
+- `diagramas/ArquiteturaCatálogo`: artefato de arquitetura do projeto.
+- `PDI/Transformação 1.ktr`: transformação versionada do Pentaho.
+- `sql/scripts/criacao_tabelas.sql`: DDL das tabelas de staging.
 
-Execute, em ordem, os notebooks/scripts de `databricks/`:
+Esses artefatos documentam etapas de análise e transformação; não representam, por si só, uma implantação completa de Bronze/Silver/Gold ou de um workspace Databricks.
 
-1. Criação do catálogo e dos schemas `bronze`, `silver` e `gold`.
-2. Tratamento da Silver (tipagem, deduplicação, padronização, `MERGE`).
-3. Construção das dimensões e da `fato_despesa` na Gold.
+## Verificações
 
-## Etapas do projeto
+Para validar a configuração Django sem executar a carga:
 
-| # | Etapa | Entregáveis principais |
-|---|---|---|
-| 1 | **Fundação** | Escopo, diagrama de arquitetura, repositório, README, `.gitignore` |
-| 2 | **Ingestão com Django/DRF** | Models, command de carga, upsert idempotente, logs, testes |
-| 3 | **ELT com PDI** | Jobs e transformações versionados, carga incremental, controle de execução |
-| 4 | **Bronze e Silver** | Unity Catalog, tabelas Delta, limpeza, padronização, checagens de qualidade |
-| 5 | **Gold e fechamento** | Star Schema, consultas analíticas, GitHub Actions, lições aprendidas |
-
-Cada etapa é documentada em um post no LinkedIn.
-
-## Qualidade de dados
-
-- **Bronze:** cópia fiel da origem, com `ingestion_ts` e identificação da fonte.
-- **Silver:** tipagem explícita, remoção de duplicados por chave natural, padronização de CPF/CNPJ e tratamento de nulos.
-- **Checagens:** unicidade de chaves, valores não negativos, integridade entre fato e dimensões e contagem de registros entre camadas.
-
-## CI/CD
-
-O workflow em `.github/workflows/` executa, a cada *pull request*:
-
-- Lint do código Python.
-- Testes automatizados com pytest.
-
-## Consultas analíticas
-
-Exemplos de perguntas que o modelo Gold responde:
-
-- Quais são os maiores fornecedores por valor líquido?
-- Qual o gasto total por partido e por UF?
-- Como evolui a despesa por mês e por tipo de despesa?
-
-```sql
-SELECT p.sigla,
-       SUM(f.valor_liquido) AS total_liquido
-FROM gold.fato_despesa f
-JOIN gold.dim_partido p ON p.sk_partido = f.sk_partido
-GROUP BY p.sigla
-ORDER BY total_liquido DESC;
+```powershell
+python manage.py check
 ```
+
+O arquivo `banco/tests.py` ainda não contém testes automatizados de ingestão. A carga real exige conexão com a API da Câmara, com o bucket R2 e com o SQL Server.
+
+## Fonte de dados
+
+- API Dados Abertos: <https://dadosabertos.camara.leg.br/api/v2>
+- Arquivos anuais de despesas: <https://www.camara.leg.br/cotas/>
 
 ## Autor
 
-**Kallebe Almeida** – Engenheiro de Dados Júnior
-[LinkedIn](https://linkedin.com/in/kallebson11)
+**Kallebe Almeida** — [LinkedIn](https://linkedin.com/in/kallebson11)

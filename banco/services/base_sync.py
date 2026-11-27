@@ -34,6 +34,7 @@ class BaseSyncService:
 
                     response.raise_for_status()
                     payload = response.json()
+                    break
                 except requests.RequestException as e:
                     if tentativa == 4:
                         raise
